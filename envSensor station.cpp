@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Will M (WishWellingtons)
+# Licensed under the MIT License. See LICENSE file in the project root for full license information.
+
 //envSensor station
 
 #include <time.h>
