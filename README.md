@@ -1,4 +1,4 @@
-# environmental_sensor_station
+# Environmental Sensor Station
 Environmental sensor station for sports turf application.
 This project is aiming to use environmental data from close to golf greens to help predict disease outbreak.
 Using such local data should take into account the difference in conditions due to microclimates that wouldn't be accounted for in a general forecast.
