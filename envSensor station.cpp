@@ -1,7 +1,4 @@
-# Copyright (c) 2025 Will M (WishWellingtons)
-# Licensed under the MIT License. See LICENSE file in the project root for full license information.
-
-//envSensor station
+//temp/humidity station
 
 #include <time.h>
 #include <Wire.h>
@@ -33,15 +30,16 @@ LuxSensor lux;
 
 //sleep time info
 #define uS_conversion 1000000ULL
-#define timeToSleep 30
 
-//battery level
+//battery level - some work still needs to be done to calibrate the battery level checker more accurately
 #define checkBat_pin 8
-const float batMax = 4.2; //battery voltage fully charged
-const float batMin = 3; //battery voltage considered empty
+const float adcMax = 4095; //max adc readout
+const float vRef = 3.3;
+const float minBat = 3.0; //voltage considered empty
+const float maxBat = 4.2; //max voltage when fully charged
 
-const char* ssid = "<SSID>";
-const char* password = "<password>";
+const char* ssid = "SSID";
+const char* password = "PASSWORD";
 const char* ntpServer = "pool.ntp.org";
 struct tm timeinfo;
 char timestring[20];
@@ -52,12 +50,13 @@ struct envData {
   float soilMoisture;
   float windSpeed;
   float light;
+  int battery;
 } data = {};
 
 
 
-String storagePlatformURL = "<URL>";
-const char* API_key = "<API-KEY>";
+String URL = "URL";
+const char* API_key = "KEY";
 
 //setup wifi and sync time
 void wifiSetup(){
@@ -97,7 +96,7 @@ float round_to_Xdp(float value, int Xdp){
 
 
 void bmeSetup(){
-    while(!Serial);    // time to get serial running
+    //while(!Serial);    // time to get serial running
     Serial.println(F("BME280 test"));
 
     unsigned status;
@@ -140,6 +139,7 @@ void DS18B20_setup(){
 }
 
 float getSoilMoisture(const float dry , const float wet){
+  float sensorReading [5] = {0,0,0,0,0};
   float sum = 0;
   for(int i = 0; i<5; i++){
     int reading = analogRead(soil_M_pin);
@@ -214,15 +214,19 @@ int postRequest(String URL, String Payload){
 
 //get the battery level - this will assume a linear discharge for now
 int battery_level(){
-  float voltage_reading = 2 * analogRead(checkBat_pin);
-  float percentage = ((voltage_reading - batMin)/(batMax - batMin)) * 100;
-  percentage = int(round_to_Xdp(percentage, 0));
-  return percentage;
+  int reading = analogRead(checkBat_pin);
+  Serial.println(reading);
+  float vOut = (reading/adcMax) * vRef;
+  float vBattery = 2 * vOut;
+  float percent = ((vBattery - minBat) / (maxBat - minBat)) * 100;
+  percent = constrain(percent, 0.0, 100.0);
+  percent = int(round_to_Xdp(percent, 0));
+  return percent;
 }
 
-int sendData(char* timestamp, float t, float h, float soilT, float soilM, float light){
-  String payload = "key=" + String(API_key) + "&field1=" + String(timestamp) + "&field2=" + String(t) + "&field3=" + String(h) + "&field4=" + String(soilT) + "&field5=" + String(soilM) + "&field6=" + String(light);
-  int dataSent = postRequest(storagePlatformURL, payload);
+int sendData(char* timestamp, float t, float h, float soilT, float soilM, float light, int battery){
+  String payload = "key=" + String(API_key) + "&field1=" + String(timestamp) + "&field2=" + String(t) + "&field3=" + String(h) + "&field4=" + String(soilT) + "&field5=" + String(soilM) + "&field6=" + String(light) + "&field7=" + String(battery);
+  int dataSent = postRequest(thingSpeakURL, payload);
   if(dataSent == 1){
     Serial.println("\n Data sent successfully");
     return 1;
@@ -242,13 +246,14 @@ void setup() {
   Serial.println("-------------");
   wifiSetup();
   delay(1000);
-  if(timeinfo.tm_hour < 23){//set for testing - change timing based on how often readings need to be collected
+  if(timeinfo.tm_hour < 23){
       bmeSetup();
       DS18B20_setup();
       getEnvData();
+      data.battery = battery_level();
       int sent = 0;
       while(sent != 1){
-        sent = sendData(timestring, data.temp, data.RH, data.soilTemp, data.soilMoisture, data.light, 0);
+        sent = sendData(timestring, data.temp, data.RH, data.soilTemp, data.soilMoisture, data.light, data.battery);
       }
       int sleepTime = 3600 - ((60*timeinfo.tm_min)+timeinfo.tm_sec); //was noticed each awakening would add 2 seconds to the time - this would cause issues after 30 wake ups when the minute wouldnt be correct. This should keep it from adding up.
       Serial.println(sleepTime);
@@ -256,7 +261,7 @@ void setup() {
       Serial.println("zzzzzzzzzz");
       Serial.flush();
 
-      esp_sleep_enable_timer_wakeup(30 * uS_conversion); //30 to be replaced by sleepTime variable
+      esp_sleep_enable_timer_wakeup(30 * uS_conversion); 
       esp_deep_sleep_start();
   }
   else{
@@ -267,7 +272,7 @@ void setup() {
     Serial.println(nextHourIn);
     Serial.println("\nnap time...");
     Serial.flush();
-    esp_sleep_enable_timer_wakeup(30 * uS_conversion); //30 to be replaced by nextHourIn
+    esp_sleep_enable_timer_wakeup(30 * uS_conversion); 
     esp_deep_sleep_start();
   }
 
@@ -276,5 +281,6 @@ void setup() {
 }
 
 void loop() {
-  //no loop - all code run in setup
+  // put your main code here, to run repeatedly:
+
 }
