@@ -1,0 +1,329 @@
+//this version saves data to a csv file on a micro sd card. NOT TESTED YET!
+
+#include <time.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+#include <WiFi.h>
+#include <DallasTemperature.h>
+#include <OneWire.h>
+#include <cmath>
+#include <LuxSensor.h>
+#include <SD.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+//bme280 sensor
+Adafruit_BME280 bme;
+//soil temp OneWire data bus and set up
+#define ONE_WIRE_BUS 1
+OneWire oneWire(ONE_WIRE_BUS); 
+DallasTemperature sensors(&oneWire);
+DeviceAddress soilSensor = {0x28, 0xC9, 0xA7, 0x7A, 0x62, 0x24, 0x0E, 0xC9};
+//soil moisure sensor
+#define soil_M_pin 2
+const float soil_moisture_0 = 3350; //these values will be determined from a separate calibration. 
+const float soil_moisture_100 = 1250;
+//light sensor
+LuxSensor lux;
+
+//sleep time info
+#define uS_conversion 1000000ULL
+
+//battery level
+#define checkBat_pin 3
+const float adcMax = 4095; //max adc readout
+const float vRef = 3.3;
+const float minBat = 3.0; //voltage considered empty
+const float maxBat = 4.2; //max voltage when fully charged
+
+//display
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+//wifi and time
+const char* ssid = "ssid";
+const char* password = "password"
+const char* ntpServer = "pool.ntp.org";
+struct tm timeinfo;
+char timestring[20];
+//data structure
+struct envData {
+  float temp;
+  float RH;
+  float soilTemp;
+  float soilMoisture;
+  float windSpeed;
+  float light;
+  int battery;
+} data = {};
+
+//File 
+File logFile;
+void appendFile(String data){
+  logFile = SD.open("/sensorLog.csv", FILE_APPEND);
+  if(logFile){
+    logFile.println(data);
+    logFile.close();
+  }
+}
+String lastEntry(const char *filename){
+  File file = SD.open(filename);
+  if(!file || file.size() == 0){
+    return "";
+  }
+  int pos = file.size() - 1;
+  file.seek(pos);
+  String lastLine = "";
+  int newLineCount = 0;
+  while(pos > 0 && newLineCount < 2){
+    pos--;
+    file.seek(pos);
+    char c = file.read();
+    if(c == '\n'){
+      newLineCount++;
+    }
+    if(newLineCount == 1){
+      lastLine = c + lastLine;
+    }
+  }
+  file.close();
+  return lastLine;
+}
+
+//button wakeup
+#define buttonPin 4
+RTC_DATA_ATTR int bootCount = 0;
+esp_sleep_wakeup_cause_t reason = esp_sleep_get_wakeup_cause();
+
+void displayData(String dataString, int bat){
+  int start = 0;
+  int comma = 0;
+  int dataIndex = 0;
+  String lastData[6];
+  while((comma = dataString.indexOf(',', start)) != -1){
+    lastData[dataIndex++] = dataString.substring(start, comma);
+    start = comma + 1;
+  }
+  lastData[dataIndex] = dataString.substring(start); //last field
+  //display on screen
+  display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0,0);
+  display.print("Time: ");
+  display.println(lastData[0]);
+  display.print("temp: ");
+  display.println(lastData[1]);
+  display.print("RH: ");
+  display.println(lastData[2]);
+  display.print("Soil Tmp: ");
+  display.println(lastData[3]);
+  display.print("Soil Mstr: ");
+  display.println(lastData[4]);
+  display.print("Light: ");
+  display.println(lastData[5]);
+  display.print("Battery %: ");
+  display.println(bat);
+  display.display();
+}
+
+//setup wifi and sync time
+void wifiSetup(){
+  WiFi.begin(ssid, password);
+
+  while(WiFi.status() != WL_CONNECTED){
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected to WiFi!");
+  Serial.print("ESP32 IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  //sync time
+  configTime(0,0,ntpServer);
+  bool gotTime = false;
+  while(gotTime == false){
+    if(getLocalTime(&timeinfo)){
+    Serial.println(&timeinfo, "%A, %B %d, %Y %H:%M:%S");
+    strftime(timestring, sizeof(timestring), "%Y-%m-%d-%H", &timeinfo);
+    Serial.print("Timestamp:");
+    Serial.println(timestring);
+    gotTime = true;
+  }
+  else{
+    Serial.println("Failed to obtain time.");
+  }
+  }
+}
+
+//rounding function
+float round_to_Xdp(float value, int Xdp){
+  float factor = pow(10.0, Xdp);
+  return (roundf(value * factor))/factor;
+}
+
+
+
+void bmeSetup(){
+    //while(!Serial);    // time to get serial running
+    Serial.println(F("BME280 test"));
+
+    unsigned status;
+    
+    // default settings
+    status = bme.begin();  
+    bme.setSampling(
+      Adafruit_BME280::MODE_FORCED,
+      Adafruit_BME280::SAMPLING_X8, //temp sampling
+      Adafruit_BME280::SAMPLING_NONE, //pressure sampling (not measuring pressure)
+      Adafruit_BME280::SAMPLING_X16, //humidity sampling
+      Adafruit_BME280::FILTER_OFF //filtering unneccessary for hourly sampling
+    );
+    // You can also pass in a Wire library object like &Wire2
+    // status = bme.begin(0x76, &Wire2)
+    if (!status) {
+        Serial.println("Could not find a valid BME280 sensor, check wiring, address, sensor ID!");
+        Serial.print("SensorID was: 0x"); Serial.println(bme.sensorID(),16);
+        Serial.print("        ID of 0xFF probably means a bad address, a BMP 180 or BMP 085\n");
+        Serial.print("   ID of 0x56-0x58 represents a BMP 280,\n");
+        Serial.print("        ID of 0x60 represents a BME 280.\n");
+        Serial.print("        ID of 0x61 represents a BME 680.\n");
+        while (1) delay(10);
+    }
+    
+    Serial.println("-- Default Test --");
+
+    Serial.println();
+}
+
+void DS18B20_setup(){
+  sensors.begin();
+  if(sensors.isConnected(soilSensor)){
+    sensors.setResolution(soilSensor, 12);
+    Serial.println("Sensor connected and res set.");
+  }
+  else{
+    Serial.println("Sensor not found!");
+  }
+}
+
+float getSoilMoisture(const float dry , const float wet){
+  float sensorReading [5] = {0,0,0,0,0};
+  float sum = 0;
+  for(int i = 0; i<5; i++){
+    int reading = analogRead(soil_M_pin);
+    Serial.print(reading); Serial.println();
+    sum += reading;
+    
+  }
+  float sensorAvg = sum/5;
+  sensorAvg = ((dry-sensorAvg)/(dry-wet)) * 100;
+  sensorAvg = constrain(sensorAvg, 0.00, 100);
+
+  return round_to_Xdp(sensorAvg, 0); //returns the moisture percetage value rounded to 0dp (to match dataset)
+}
+
+float getLight(){
+  float L = lux.getLux();
+  return L;
+}
+
+String getEnvData(){
+  sensors.setWaitForConversion(false);//there is a wait time for getting the soil temp - this allows other data to be collected while the soilTemp sensor is measuring temp
+  sensors.requestTemperaturesByAddress(soilSensor);
+  unsigned long startTime = millis();
+  unsigned long waitTime = 750; //for the resolution set, the sensor should take around 375ms to get the temp, this value could be adjusted if 400 is too long
+  Serial.println("Reading sensor data...");
+  bme.takeForcedMeasurement(); //bme sensor running in forced mode, not continuous - must tell it when to take measurement, and then get the measurements.
+  data.temp = round_to_Xdp(bme.readTemperature(), 2); //ambient temp
+  data.RH = round_to_Xdp(bme.readHumidity(), 2); //relative humidity
+  while(millis() - startTime < waitTime){}; //ensuring enough time has passed for the soil temp sensor to have a value ready
+  data.soilTemp = round_to_Xdp(sensors.getTempC(soilSensor), 2); //soil temp
+  data.soilMoisture = getSoilMoisture(soil_moisture_0, soil_moisture_100); //soil moisture
+  data.light = getLight(); //ambient light
+  String logData = String(data.temp) + "," + String(data.RH) + "," + String(data.soilTemp) + "," + String(data.soilMoisture) + "," + String(data.light);
+  //print statements for initial testing - comment out when deploying
+  Serial.print("\ntemp: ");
+  Serial.print(data.temp);
+  Serial.print(", humidity: ");
+  Serial.print(data.RH);
+  Serial.print(", soil temp: ");
+  Serial.print(data.soilTemp);
+  Serial.print(", soil moisture: ");
+  Serial.print(data.soilMoisture);
+  Serial.print(", light: ");
+  Serial.print(data.light);
+  Serial.println();
+  return logData;
+}
+
+
+//get the battery level - this will assume a linear discharge for now
+int battery_level(){
+  int reading = analogRead(checkBat_pin);
+  Serial.println(reading);
+  float vOut = (reading/adcMax) * vRef;
+  float vBattery = 2 * vOut;
+  float percent = ((vBattery - minBat) / (maxBat - minBat)) * 100;
+  percent = constrain(percent, 0.0, 100.0);
+  percent = int(round_to_Xdp(percent, 0));
+  return percent;
+}
+
+
+
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\nAwake!");
+  Serial.println("-------------");
+  bootCount++;
+
+  if(reason == ESP_SLEEP_WAKEUP_EXT0){
+    String lastLog = lastEntry("/sensorLog.csv");
+    displayData(lastLog, battery_level());
+    
+  }
+  wifiSetup();
+  delay(1000);
+  if(timeinfo.tm_hour < 23){
+      bmeSetup();
+      DS18B20_setup();
+      appendFile(getEnvData());
+      data.battery = battery_level();
+      
+      int sleepTime = 3600 - ((60*timeinfo.tm_min)+timeinfo.tm_sec); //was noticed each awakening would add 2 seconds to the time - this would cause issues after 30 wake ups when the minute wouldnt be correct. This should keep it from adding up.
+      Serial.println(sleepTime);
+      Serial.println("Completed - time to nap...");
+      Serial.println("zzzzzzzzzz");
+      Serial.flush();
+
+      esp_sleep_enable_timer_wakeup(30 * uS_conversion); 
+      esp_deep_sleep_start();
+  }
+  else{
+    //sleep until next hour mark
+    Serial.println("\nIncorrect time to get data.");
+    Serial.println(timeinfo.tm_hour);
+    int nextHourIn = 60 * (60 - timeinfo.tm_min);
+    Serial.println(nextHourIn);
+    Serial.println("\nnap time...");
+    Serial.flush();
+    esp_sleep_enable_timer_wakeup(30 * uS_conversion); 
+    esp_deep_sleep_start();
+  }
+
+
+
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+
+}
